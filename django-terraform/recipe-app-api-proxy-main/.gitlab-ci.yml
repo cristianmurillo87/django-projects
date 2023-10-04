@@ -1,0 +1,45 @@
+image: docker:19.03.5
+services:
+  - docker:19.03.5-dind
+
+stages:
+  - Build
+  - Push
+
+before_script:
+  - apk add python3
+  - pip3 install awscli==1.18.8
+  - docker load --input data/image.tar
+  - $(aws ecr get-login --no-include-email --region us-east-1)
+
+Build:
+  stage: Build
+  # Don't run the before_script section above for this job
+  before_script: []
+  script:
+    - mkdir data/
+    - docker build --compress -t proxy .
+    - docker save --output data/image.tar proxy
+  artifacts:
+    name: image
+    paths:
+      - data/
+
+Push Dev:
+  stage: Push
+  script:
+    - docker tag proxy:latest $ECR_REPO:dev
+    - docker push $ECR_REPO:dev
+  rules:
+    - if: "$CI_COMMIT_BRANCH == 'main'"
+
+Push Release:
+  stage: Push
+  script:
+    - export TAGGED_ECR_REPO=$ECR_REPO:$(echo $CI_COMMIT_TAG | sed 's/-release//')
+    - docker tag proxy:latest $TAGGED_ECR_REPO
+    - docker push $TAGGED_ECR_REPO
+    - docker tag $TAGGED_ECR_REPO $ECR_REPO:latest
+    - docker push $ECR_REPO:latest
+  rules:
+    - if: "$CI_COMMIT_TAG =~ /^*-release$/"

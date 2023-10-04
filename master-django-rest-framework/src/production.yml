@@ -1,0 +1,82 @@
+version: "3.9"
+
+services:
+  es:
+    image: elasticsearch:7.17.9
+    environment:
+      - discovery.type=single-node
+    ports:
+      - "9200:9200"
+    networks:
+      - reverseproxy_nw
+  api: &api # anchor for this service
+    build:
+      context: .
+      dockerfile: ./docker/production/django/Dockerfile
+    image: authors-api
+    volumes:
+      - static_volume:/app/staticfiles
+      - media_volume:/app/mediafiles
+    expose:
+      - "8000"
+    env_file:
+      - ./.envs/.production/.django
+      - ./.envs/.production/.postgres
+    depends_on:
+      - postgres
+      - redis
+      - es
+    command: /start
+    networks:
+      - reverseproxy_nw
+
+  postgres:
+    build:
+      context: .
+      dockerfile: ./docker/production/postgres/Dockerfile
+    image: authors_api_database
+    volumes:
+      - production_postgres_data:/var/lib/postgresql/data
+      - production_postgres_data_backups:/backups
+    env_file:
+      - ./.envs/.production/.postgres
+    networks:
+      - reverseproxy_nw
+  
+  redis:
+    image: redis:7-alpine
+    networks:
+      - reverseproxy_nw
+  
+  # both the api and celery_worker services depend on the same Dockerfile
+  # using the anchor (api) created in the api service (&api),
+  # it is possible to use the configurations defined there for celery_worker
+  celery_worker:
+    <<: *api
+    image: authors_api_celery_worker
+    command: /start-celeryworker
+    networks:
+      - reverseproxy_nw
+
+  flower:
+    <<: *api
+    image: authors_api_flower
+    command: /start-flower
+    volumes:
+      - flower_data:/data
+    ports:
+      - "5555:5555"
+    networks:
+      - reverseproxy_nw
+
+networks:
+  reverseproxy_nw:
+    external: true
+
+
+volumes:
+  static_volume: {}
+  media_volume: {}
+  production_postgres_data: {}
+  production_postgres_data_backups: {}
+  flower_data: {}

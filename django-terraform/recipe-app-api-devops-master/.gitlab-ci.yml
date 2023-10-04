@@ -1,0 +1,140 @@
+image:
+  name: hashicorp/terraform:0.12.21
+  # Override the entrypoint of the terraform image
+  # The default entrypoint works with local installations of Terraform
+  # but in order to run Terraform for a GitLab pipeline, the entrypoint had to be modified
+  entrypoint:
+    - '/usr/bin/env'
+    - 'PATH=/usr/local/sbin:/usr/local/bin/:/usr/sbin:/usr/bin:/sbin:/bin'
+
+
+stages:
+  # Run unit tests and linting
+  - Test and Lint
+  # Build a docker image and push it to ECR
+  - Build and Push
+  # Run the Terraform Plan (Staging)
+  - Staging Plan
+  # Apply the changes to the Terraform (Staging)
+  - Staging Apply
+  # Run the Terraform Plan (Production)
+  - Production Plan
+  # Apply the changes to the Terraform (Production)
+  - Production Apply
+  # Manual job to destroy the Terraform environment 
+  - Destroy
+
+
+Test and Lint:
+  image: docker:19.03.5
+  services:
+  # dind -> docker in docker
+    - docker:19.03.5-dind
+  stage: Test and Lint
+  script:
+    - apk add --update docker-compose
+    - docker-compose run --rm app sh -c "python manage.py wait_for_db && python manage.py test && flake8"
+  rules:
+    # Run the job if a MR if a branch is merged to the master or production branches
+    # Or when a commit is made to one of such branches 
+    - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME =~ /^(master|production)$/ || $CI_COMMIT_BRANCH =~ /^(master|production)$/'
+
+Validate Terraform:
+  stage: Test and Lint
+  script:
+    - cd deploy/
+    # Initialize Terraform by cloning the providers needed to validate the Terraform
+    # The job is run in an unprotected branch therefore -backend=false
+    - terraform init -backend=false
+    # Validate Terraform
+    - terraform validate
+    # Apply formatting to the .tf files
+    - terraform fmt -check
+  rules:
+    - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME =~ /^(master|production)$/ || $CI_COMMIT_BRANCH =~ /^(master|production)$/'
+
+Build and Push:
+  stage: Build and Push
+  image: docker:19.03.5
+  services:
+    - docker:19.03.5-dind
+  script:
+    - apk add python3
+    - pip3 install awscli
+    - docker build --compress -t $ECR_REPO:$CI_COMMIT_SHORT_SHA .
+    - $(aws ecr get-login --no-include-email --region us-east-1)
+    - docker push $ECR_REPO:$CI_COMMIT_SHORT_SHA
+    - docker tag $ECR_REPO:$CI_COMMIT_SHORT_SHA $ECR_REPO:latest
+    - docker push $ECR_REPO:latest
+  rules:
+    - if: '$CI_COMMIT_BRANCH =~ /^(master|production)$/'
+
+Staging Plan:
+  stage: Staging Plan
+  script:
+    - cd deploy/
+    # Create env variable
+    - export TF_VAR_ecr_image_api=$ECR_REPO:$CI_COMMIT_SHORT_SHA
+    - terraform init
+    - terraform workspace select staging || terraform workspace new staging
+    - terraform plan
+  rules:
+    - if: '$CI_COMMIT_BRANCH =~ /^(master|production)$/'
+
+Staging Apply:
+  stage: Staging Apply
+  script:
+    - cd deploy/
+    - export TF_VAR_ecr_image_api=$ECR_REPO:$CI_COMMIT_SHORT_SHA
+    - terraform init
+    - terraform workspace select staging
+    # use -auto-approve so that terraform applies changes when run from a pipeline
+    # (where the user cannot confirm the apply through the console)
+    - terraform apply -auto-approve
+
+  rules:
+    - if: '$CI_COMMIT_BRANCH =~ /^(master|production)$/'
+
+Production Plan:
+  stage: Production Plan
+  script:
+    - cd deploy/
+    - export TF_VAR_ecr_image_api=$ECR_REPO:$CI_COMMIT_SHORT_SHA
+    - terraform init
+    - terraform workspace select production || terraform workspace new production
+    - terraform plan
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "production"'
+
+Production Apply:
+  stage: Production Apply
+  script:
+    - cd deploy/
+    - export TF_VAR_ecr_image_api=$ECR_REPO:$CI_COMMIT_SHORT_SHA
+    - terraform init
+    - terraform workspace select production
+    - terraform apply -auto-approve
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "production"'
+
+Staging Destroy:
+  stage: Destroy
+  script:
+    - cd deploy/
+    - terraform init
+    - terraform workspace select staging
+    - terraform destroy -auto-approve
+  rules:
+    - if: '$CI_COMMIT_BRANCH =~ /^(master|production)$/'
+      when: manual
+
+Production Destroy:
+  stage: Destroy
+  script:
+    - cd deploy/
+    - terraform init
+    - terraform workspace select production
+    - terraform destroy -auto-approv
+  rules:
+    - if: '$CI_COMMIT_BRANCH =~ /^(master|production)$/'
+      when: manual
